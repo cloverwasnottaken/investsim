@@ -277,6 +277,14 @@
     font-weight:600; font-size:13px; font-family:'Inter',sans-serif;
   }
   .side-toggle button.active{ background:var(--ink); color:var(--paper); }
+  .unit-toggle{ display:flex; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; margin-bottom:14px; width:fit-content; }
+  .unit-toggle button{
+    padding:6px 14px; border:none; background:var(--paper); cursor:pointer;
+    font-weight:500; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--gray);
+    border-right:1px solid var(--line);
+  }
+  .unit-toggle button:last-child{ border-right:none; }
+  .unit-toggle button.active{ background:var(--ink); color:var(--paper); }
   .modal-summary{
     display:flex; justify-content:space-between; font-size:13px; padding:12px 0;
     border-top:1px solid var(--line-soft); margin-top:16px; font-family:'IBM Plex Mono',monospace;
@@ -733,8 +741,14 @@ function renderModal(){
   const price = p ? p.price : (state.holdings.find(h=>h.symbol===m.symbol)?.avg_cost || 0);
   const held = state.holdings.find(h=>h.symbol===m.symbol);
   const side = m.side || "buy";
-  const qty = m.qty ?? "";
-  const total = qty && price ? Number(qty) * price : 0;
+  const unit = m.unit || "usd";
+  const raw = Number(m.qty) || 0;
+
+  // Interpret the raw input differently depending on unit: in "usd" mode the
+  // input IS the dollar amount; in "qty" mode the input IS the share count.
+  const amountUsd = unit === "usd" ? raw : raw * price;
+  const shareQty = unit === "usd" ? (price ? raw / price : 0) : raw;
+  const total = amountUsd;
 
   return `
   <div class="overlay" id="overlay">
@@ -748,10 +762,16 @@ function renderModal(){
         <button class="${side==='buy'?'active':''}" data-side="buy" id="sideBuy">Buy</button>
         <button class="${side==='sell'?'active':''}" data-side="sell" id="sideSell" ${!held?'disabled':''}>Sell</button>
       </div>
-      <div class="field">
-        <label>Quantity</label>
-        <input type="number" id="qtyInput" min="0" step="0.0001" value="${qty}" placeholder="0.00" />
+      <div class="unit-toggle">
+        <button class="${unit==='usd'?'active':''}" data-unit="usd" id="unitUsd">$ Amount</button>
+        <button class="${unit==='qty'?'active':''}" data-unit="qty" id="unitQty">Shares</button>
       </div>
+      <div class="field">
+        <label>${unit==='usd' ? 'Amount (USD)' : 'Quantity'}</label>
+        <input type="number" id="qtyInput" min="0" step="${unit==='usd'?'0.01':'0.0001'}" value="${m.qty ?? ''}" placeholder="${unit==='usd'?'0.00':'0.0000'}" />
+      </div>
+      ${unit==='usd' && raw>0 ? `<div class="add-hint">≈ ${fmt(shareQty,6)} shares</div>` : ''}
+      ${unit==='qty' && raw>0 ? `<div class="add-hint">≈ ${fmtUsd(amountUsd)}</div>` : ''}
       <div class="qty-quick">
         <button data-pct="0.25">25%</button>
         <button data-pct="0.5">50%</button>
@@ -819,14 +839,14 @@ function bindEvents(){
 
   document.querySelectorAll(".asset-card").forEach(card => {
     card.addEventListener("click", () => {
-      state.modal = { symbol: card.dataset.symbol, name: card.dataset.name, side:"buy", qty:"" };
+      state.modal = { symbol: card.dataset.symbol, name: card.dataset.name, side:"buy", unit:"usd", qty:"" };
       render();
     });
   });
 
   document.querySelectorAll(".openTrade").forEach(btn => {
     btn.addEventListener("click", () => {
-      state.modal = { symbol: btn.dataset.symbol, name: btn.dataset.name, side:"sell", qty:"" };
+      state.modal = { symbol: btn.dataset.symbol, name: btn.dataset.name, side:"sell", unit:"qty", qty:"" };
       render();
     });
   });
@@ -839,7 +859,7 @@ function bindEvents(){
     try{
       const data = await fetchQuote(raw);
       state.prices[raw] = data;
-      state.modal = { symbol: raw, name: raw.toUpperCase(), side:"buy", qty:"" };
+      state.modal = { symbol: raw, name: raw.toUpperCase(), side:"buy", unit:"usd", qty:"" };
       render();
     }catch(e){
       toast("Couldn't find that symbol on Yahoo Finance.");
@@ -855,8 +875,31 @@ function bindEvents(){
     $("#modalCancel")?.addEventListener("click", () => { state.modal = null; render(); });
     $("#overlay")?.addEventListener("click", (e) => { if(e.target.id === "overlay"){ state.modal = null; render(); } });
 
-    $("#sideBuy")?.addEventListener("click", () => { state.modal.side = "buy"; state.modal.error=""; render(); });
-    $("#sideSell")?.addEventListener("click", () => { if(!$("#sideSell").disabled){ state.modal.side = "sell"; state.modal.error=""; render(); } });
+    $("#sideBuy")?.addEventListener("click", () => { state.modal.side = "buy"; state.modal.unit = "usd"; state.modal.qty = ""; state.modal.error=""; render(); });
+    $("#sideSell")?.addEventListener("click", () => { if(!$("#sideSell").disabled){ state.modal.side = "sell"; state.modal.unit = "qty"; state.modal.qty = ""; state.modal.error=""; render(); } });
+
+    $("#unitUsd")?.addEventListener("click", () => {
+      const m = state.modal;
+      if(m.unit !== "usd"){
+        const p = state.prices[m.symbol];
+        const price = p ? p.price : 0;
+        const shareQty = Number(m.qty) || 0;
+        m.qty = price ? (shareQty * price).toFixed(2) : "";
+        m.unit = "usd";
+        render();
+      }
+    });
+    $("#unitQty")?.addEventListener("click", () => {
+      const m = state.modal;
+      if(m.unit !== "qty"){
+        const p = state.prices[m.symbol];
+        const price = p ? p.price : 0;
+        const amountUsd = Number(m.qty) || 0;
+        m.qty = price ? (amountUsd / price).toFixed(6) : "";
+        m.unit = "qty";
+        render();
+      }
+    });
 
     $("#qtyInput")?.addEventListener("input", (e) => { state.modal.qty = e.target.value; renderModalOnly(); });
 
@@ -867,10 +910,12 @@ function bindEvents(){
         const price = p ? p.price : 0;
         const pct = parseFloat(b.dataset.pct);
         if(m.side === "buy" && price){
-          m.qty = ((state.user.balance * pct) / price).toFixed(6);
+          const amountUsd = state.user.balance * pct;
+          m.qty = m.unit === "usd" ? amountUsd.toFixed(2) : (amountUsd / price).toFixed(6);
         } else if(m.side === "sell"){
           const held = state.holdings.find(h=>h.symbol===m.symbol);
-          m.qty = held ? (held.quantity * pct).toFixed(6) : "0";
+          const shareQty = held ? held.quantity * pct : 0;
+          m.qty = m.unit === "usd" ? (shareQty * price).toFixed(2) : shareQty.toFixed(6);
         }
         render();
       });
@@ -880,9 +925,13 @@ function bindEvents(){
       const m = state.modal;
       const p = state.prices[m.symbol];
       const price = p ? p.price : null;
-      const qty = parseFloat(m.qty);
+      const raw = parseFloat(m.qty);
       if(!price){ m.error = "Price unavailable right now."; render(); return; }
-      if(!qty || qty <= 0){ m.error = "Enter a quantity."; render(); return; }
+      if(!raw || raw <= 0){ m.error = m.unit === "usd" ? "Enter an amount." : "Enter a quantity."; render(); return; }
+      // Convert to shares if the person typed a dollar amount. Rounded to 6
+      // decimal places, same precision the quantity input already allowed.
+      const qty = m.unit === "usd" ? Number((raw / price).toFixed(6)) : raw;
+      if(!qty || qty <= 0){ m.error = "That amount is too small to buy any shares."; render(); return; }
       $("#modalConfirm").disabled = true;
       try{
         await executeTrade(m.symbol, m.name, m.side, qty, price);
