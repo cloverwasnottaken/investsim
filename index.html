@@ -363,11 +363,17 @@ function saveSession(){
 
 /* ================= PRICE FETCHING (Stooq, no key, via CORS proxies) ================= */
 const priceCache = {}; // symbol -> {data, ts}
-// corsproxy.io's free tier now only works from localhost, so it's not usable
-// once this is deployed anywhere else. These two stay key-free for any domain.
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Free CORS proxies are all rate-limited / occasionally down (no SLA on any of
+// them). We try several, in order, and log the real reason to the console
+// instead of silently marking things "unavailable" so this is debuggable.
+// corsproxy.io is deliberately excluded: as of 2026 its free tier only works
+// from localhost, so it 403s on any deployed domain.
 const PROXIES = [
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  { name:"allorigins", build:(u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
+  { name:"codetabs",   build:(u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}` },
+  { name:"jina-reader",build:(u) => `https://r.jina.ai/${u}` },
 ];
 
 async function fetchStooq(symbol){
@@ -377,39 +383,55 @@ async function fetchStooq(symbol){
   const stooqUrl = `https://stooq.com/q/l/?s=${encodeURIComponent(symbol.toLowerCase())}&f=sd2t2ohlc&h&e=csv`;
   let lastErr = null;
 
-  for(const wrap of PROXIES){
+  for(const proxy of PROXIES){
     try{
-      const res = await fetch(wrap(stooqUrl));
-      if(!res.ok) throw new Error("bad status " + res.status);
-      const text = await res.text();
-      const lines = text.trim().split("\n");
-      if(lines.length < 2) throw new Error("no data row");
+      const res = await fetch(proxy.build(stooqUrl));
+      if(!res.ok) throw new Error(`${proxy.name}: HTTP ${res.status}`);
+      const text = (await res.text()).trim();
+
+      if(!text || /^<(!doctype|html)/i.test(text)){
+        throw new Error(`${proxy.name}: got HTML instead of CSV (proxy error page)`);
+      }
+
+      const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+      if(lines.length < 2) throw new Error(`${proxy.name}: no data row in response: "${text.slice(0,120)}"`);
+
       const cols = lines[1].split(",");
       // Symbol,Date,Time,Open,High,Low,Close
+      if(cols.length < 7) throw new Error(`${proxy.name}: unexpected CSV shape: "${lines[1]}"`);
+
       const open = parseFloat(cols[3]);
       const close = parseFloat(cols[6]);
-      if(!isFinite(close) || close <= 0) throw new Error("no price");
+      if(cols[6] === "N/D" || !isFinite(close) || close <= 0){
+        throw new Error(`${proxy.name}: symbol not found on Stooq ("${symbol}")`);
+      }
       const changePct = isFinite(open) && open > 0 ? ((close-open)/open)*100 : 0;
       const data = { price: close, open, changePct };
       priceCache[symbol] = { data, ts: Date.now() };
       return data;
     }catch(e){
       lastErr = e;
+      console.warn(`[price] ${symbol} via ${proxy.name} failed:`, e.message);
       continue;
     }
   }
   throw lastErr || new Error("all proxies failed");
 }
 
-async function refreshPrices(symbols){
+async function refreshPrices(symbols, onEach){
   const unique = [...new Set(symbols)];
-  await Promise.all(unique.map(async (sym) => {
+  // Sequential with a small stagger — free proxies rate-limit hard on bursts,
+  // and firing 8+ requests at once was tripping that and failing everything.
+  for(const sym of unique){
     try{
       state.prices[sym] = await fetchStooq(sym);
     }catch(e){
+      console.error(`[price] ${sym} unavailable:`, e.message);
       if(!state.prices[sym]) state.prices[sym] = null;
     }
-  }));
+    if(onEach) onEach(sym);
+    await sleep(120);
+  }
 }
 
 /* ================= AUTH ================= */
@@ -758,7 +780,7 @@ function bindEvents(){
         state.user = { id:data.id, username:data.username, balance:Number(data.balance) };
         saveSession();
         await loadUserData(state.user.id);
-        await refreshPrices(allTrackedSymbols());
+        await refreshPrices(allTrackedSymbols(), () => render());
         render();
       }catch(err){
         state.authError = err.message || "Something went wrong.";
@@ -885,12 +907,16 @@ async function boot(){
     }catch(e){ /* ignore, fall back to auth screen */ }
   }
 
-  await refreshPrices(MAIN_ASSETS.map(a=>a.symbol).concat(state.holdings.map(h=>h.symbol)));
+  await refreshPrices(
+    MAIN_ASSETS.map(a=>a.symbol).concat(state.holdings.map(h=>h.symbol)),
+    () => { if(state.user) render(); }
+  );
   render();
 
   setInterval(async () => {
+    // Skip disruptive full re-renders while a trade modal is open mid-edit.
     await refreshPrices(allTrackedSymbols());
-    render();
+    if(!state.modal) render();
   }, 30000);
 }
 
