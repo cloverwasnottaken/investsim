@@ -371,10 +371,20 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // corsproxy.io is deliberately excluded: as of 2026 its free tier only works
 // from localhost, so it 403s on any deployed domain.
 const PROXIES = [
-  { name:"allorigins", build:(u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
   { name:"codetabs",   build:(u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}` },
   { name:"jina-reader",build:(u) => `https://r.jina.ai/${u}` },
+  { name:"allorigins", build:(u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
 ];
+
+async function fetchWithTimeout(url, ms){
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try{
+    return await fetch(url, { signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 async function fetchStooq(symbol){
   const cached = priceCache[symbol];
@@ -385,7 +395,7 @@ async function fetchStooq(symbol){
 
   for(const proxy of PROXIES){
     try{
-      const res = await fetch(proxy.build(stooqUrl));
+      const res = await fetchWithTimeout(proxy.build(stooqUrl), 8000);
       if(!res.ok) throw new Error(`${proxy.name}: HTTP ${res.status}`);
       const text = (await res.text()).trim();
 
@@ -394,11 +404,15 @@ async function fetchStooq(symbol){
       }
 
       const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-      if(lines.length < 2) throw new Error(`${proxy.name}: no data row in response: "${text.slice(0,120)}"`);
+      // jina-reader wraps content with "Title: ...\nURL Source: ...\n..." before
+      // the actual body, so find the real Stooq data row rather than assuming
+      // it's the second line — it always looks like SYMBOL,YYYY-MM-DD,...
+      const dataLine = lines.find(l => /^[A-Za-z0-9._-]+,\d{4}-\d{2}-\d{2},/.test(l));
+      if(!dataLine) throw new Error(`${proxy.name}: no data row found in response: "${text.slice(0,150)}"`);
 
-      const cols = lines[1].split(",");
+      const cols = dataLine.split(",");
       // Symbol,Date,Time,Open,High,Low,Close
-      if(cols.length < 7) throw new Error(`${proxy.name}: unexpected CSV shape: "${lines[1]}"`);
+      if(cols.length < 7) throw new Error(`${proxy.name}: unexpected CSV shape: "${dataLine}"`);
 
       const open = parseFloat(cols[3]);
       const close = parseFloat(cols[6]);
