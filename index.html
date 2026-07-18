@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ledger — Portfolio Simulator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;0,9..144,600;1,9..144,500&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<style>
+  :root{
+    --ink:#0A0A0A;
+    --paper:#FAFAF8;
+    --line:#DCDBD6;
+    --line-soft:#EAE9E4;
+    --gray:#6B6A64;
+    --gray-soft:#9A998F;
+    --up:#1F6F4A;
+    --down:#A3312A;
+    --card:#FFFFFF;
+    --radius:2px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'Inter',system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+  }
+  ::selection{background:var(--ink);color:var(--paper);}
+  a{color:inherit;}
+  .serif{font-family:'Fraunces',serif;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+
+  /* ---------- Ticker tape (signature element) ---------- */
+  .ticker-wrap{
+    background:var(--ink);
+    color:var(--paper);
+    overflow:hidden;
+    white-space:nowrap;
+    border-bottom:1px solid var(--ink);
+    position:relative;
+  }
+  .ticker-track{
+    display:inline-flex;
+    padding:9px 0;
+    animation:scroll 42s linear infinite;
+  }
+  .ticker-track:hover{ animation-play-state:paused; }
+  @keyframes scroll{
+    0%{ transform:translateX(0); }
+    100%{ transform:translateX(-50%); }
+  }
+  .ticker-item{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    letter-spacing:0.02em;
+    padding:0 22px;
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    opacity:0.92;
+  }
+  .ticker-item .sym{ font-weight:600; }
+  .ticker-item .chg.up{ color:#6FCF9E; }
+  .ticker-item .chg.down{ color:#E38B85; }
+
+  @media (prefers-reduced-motion: reduce){
+    .ticker-track{ animation:none; }
+  }
+
+  /* ---------- Shell ---------- */
+  .shell{ max-width:1120px; margin:0 auto; padding:0 28px; }
+  header.top{
+    display:flex; align-items:baseline; justify-content:space-between;
+    padding:34px 0 22px;
+    border-bottom:1px solid var(--line);
+  }
+  .brand{ display:flex; align-items:baseline; gap:10px; }
+  .brand .mark{
+    font-size:26px; font-weight:600; letter-spacing:-0.01em;
+  }
+  .brand .tag{
+    font-size:11px; color:var(--gray); text-transform:uppercase; letter-spacing:0.14em;
+  }
+  .session{ display:flex; align-items:center; gap:18px; font-size:13px; color:var(--gray); }
+  .session b{ color:var(--ink); font-weight:600; }
+  .btn-link{
+    background:none;border:none;font:inherit;color:var(--ink);
+    text-decoration:underline; text-underline-offset:3px; cursor:pointer;
+    padding:0;
+  }
+
+  /* ---------- Buttons ---------- */
+  .btn{
+    font-family:'Inter',sans-serif;
+    font-size:13.5px; font-weight:600;
+    padding:11px 20px;
+    border:1px solid var(--ink);
+    background:var(--ink); color:var(--paper);
+    cursor:pointer;
+    border-radius:var(--radius);
+    letter-spacing:0.01em;
+    transition:opacity .15s ease;
+  }
+  .btn:hover{ opacity:0.82; }
+  .btn.ghost{ background:transparent; color:var(--ink); }
+  .btn.subtle{
+    background:transparent;border-color:var(--line);color:var(--ink);
+    font-weight:500;
+  }
+  .btn.danger{ border-color:var(--down); color:var(--down); background:transparent; }
+  .btn:disabled{ opacity:0.35; cursor:not-allowed; }
+  .btn.block{ width:100%; }
+
+  /* ---------- Auth screen ---------- */
+  .auth-screen{
+    min-height:calc(100vh - 40px);
+    display:flex; align-items:center; justify-content:center;
+    padding:40px 20px;
+  }
+  .auth-card{
+    width:100%; max-width:380px;
+  }
+  .auth-eyebrow{
+    font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:var(--gray);
+    margin-bottom:10px;
+  }
+  .auth-card h1{
+    font-family:'Fraunces',serif; font-weight:500; font-size:34px;
+    margin:0 0 6px; letter-spacing:-0.01em; line-height:1.05;
+  }
+  .auth-card p.sub{ color:var(--gray); font-size:14px; margin:0 0 28px; }
+  .field{ margin-bottom:14px; }
+  .field label{
+    display:block; font-size:11px; text-transform:uppercase; letter-spacing:0.1em;
+    color:var(--gray); margin-bottom:6px;
+  }
+  .field input{
+    width:100%; padding:12px 13px; border:1px solid var(--line);
+    background:var(--card); font-family:'IBM Plex Mono',monospace; font-size:14px;
+    border-radius:var(--radius); color:var(--ink);
+  }
+  .field input:focus{ outline:none; border-color:var(--ink); }
+  .auth-toggle{ margin-top:20px; font-size:13px; color:var(--gray); text-align:center; }
+  .auth-error{
+    font-size:13px; color:var(--down); margin-top:10px; min-height:16px;
+  }
+  .auth-note{
+    margin-top:26px; padding-top:18px; border-top:1px solid var(--line-soft);
+    font-size:12px; color:var(--gray-soft); line-height:1.5;
+  }
+
+  /* ---------- Summary strip ---------- */
+  .summary{
+    display:grid; grid-template-columns:repeat(4,1fr);
+    border:1px solid var(--line); border-radius:var(--radius);
+    margin:26px 0; background:var(--card);
+  }
+  .summary .cell{
+    padding:20px 22px; border-right:1px solid var(--line-soft);
+  }
+  .summary .cell:last-child{ border-right:none; }
+  .summary .cell .label{
+    font-size:11px; text-transform:uppercase; letter-spacing:0.1em; color:var(--gray);
+    margin-bottom:8px;
+  }
+  .summary .cell .value{
+    font-family:'IBM Plex Mono',monospace; font-size:22px; font-weight:500;
+  }
+  .summary .cell .value.up{ color:var(--up); }
+  .summary .cell .value.down{ color:var(--down); }
+
+  @media (max-width:720px){
+    .summary{ grid-template-columns:repeat(2,1fr); }
+    .summary .cell:nth-child(2){ border-right:none; }
+  }
+
+  /* ---------- Section headers ---------- */
+  .sec-head{
+    display:flex; align-items:baseline; justify-content:space-between;
+    margin:44px 0 16px;
+  }
+  .sec-head h2{
+    font-family:'Fraunces',serif; font-weight:500; font-size:20px; margin:0;
+  }
+  .sec-head .count{ font-size:12px; color:var(--gray); font-family:'IBM Plex Mono',monospace; }
+
+  /* ---------- Asset grid ---------- */
+  .grid{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
+    background:var(--line); border:1px solid var(--line);
+  }
+  @media (max-width:900px){ .grid{ grid-template-columns:repeat(2,1fr); } }
+  @media (max-width:520px){ .grid{ grid-template-columns:1fr; } }
+
+  .asset-card{
+    background:var(--card); padding:20px; cursor:pointer;
+    transition:background .12s ease;
+    display:flex; flex-direction:column; gap:10px;
+  }
+  .asset-card:hover{ background:#F2F1EC; }
+  .asset-top{ display:flex; justify-content:space-between; align-items:flex-start; }
+  .asset-sym{ font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:15px; }
+  .asset-name{ font-size:12px; color:var(--gray); margin-top:2px; max-width:150px; }
+  .asset-price{ text-align:right; }
+  .asset-price .p{ font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:500; }
+  .asset-price .c{ font-family:'IBM Plex Mono',monospace; font-size:11.5px; margin-top:2px; }
+  .asset-price .c.up{ color:var(--up); }
+  .asset-price .c.down{ color:var(--down); }
+  .asset-held{
+    font-size:11.5px; color:var(--gray); font-family:'IBM Plex Mono',monospace;
+    border-top:1px dashed var(--line-soft); padding-top:8px;
+  }
+  .asset-held b{ color:var(--ink); }
+  .asset-loading{ color:var(--gray-soft); font-family:'IBM Plex Mono',monospace; font-size:12px; }
+
+  /* ---------- Add symbol row ---------- */
+  .add-row{
+    display:flex; gap:10px; margin-top:16px; flex-wrap:wrap;
+  }
+  .add-row input{
+    flex:1; min-width:200px; padding:11px 13px; border:1px solid var(--line);
+    font-family:'IBM Plex Mono',monospace; font-size:13.5px; border-radius:var(--radius);
+    background:var(--card);
+  }
+  .add-row input:focus{ outline:none; border-color:var(--ink); }
+  .add-hint{ font-size:11.5px; color:var(--gray-soft); margin-top:8px; line-height:1.5; }
+
+  /* ---------- Table (holdings / history) ---------- */
+  table{ width:100%; border-collapse:collapse; }
+  .tbl{ border:1px solid var(--line); background:var(--card); }
+  .tbl th{
+    text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.08em;
+    color:var(--gray); font-weight:500; padding:12px 16px; border-bottom:1px solid var(--line);
+  }
+  .tbl td{
+    padding:13px 16px; font-size:13.5px; border-bottom:1px solid var(--line-soft);
+    font-family:'IBM Plex Mono',monospace;
+  }
+  .tbl tr:last-child td{ border-bottom:none; }
+  .tbl td.name{ font-family:'Inter',sans-serif; color:var(--gray); }
+  .tbl .up{ color:var(--up); }
+  .tbl .down{ color:var(--down); }
+  .tbl .row-actions{ display:flex; gap:8px; }
+  .tbl .row-actions button{ font-size:12px; padding:6px 11px; }
+  .empty-state{
+    padding:40px 20px; text-align:center; color:var(--gray-soft);
+    font-size:13px; border:1px dashed var(--line); background:var(--card);
+  }
+
+  footer.legal{
+    margin:60px 0 40px; padding-top:20px; border-top:1px solid var(--line-soft);
+    font-size:11.5px; color:var(--gray-soft); line-height:1.6;
+  }
+
+  /* ---------- Modal ---------- */
+  .overlay{
+    position:fixed; inset:0; background:rgba(10,10,10,0.5);
+    display:flex; align-items:center; justify-content:center; z-index:50;
+    padding:20px;
+  }
+  .modal{
+    background:var(--paper); width:100%; max-width:400px;
+    border:1px solid var(--ink); border-radius:var(--radius);
+    padding:28px;
+  }
+  .modal-head{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:20px; }
+  .modal-head h3{ font-family:'Fraunces',serif; font-size:22px; font-weight:500; margin:0; }
+  .modal-head .close{ background:none;border:none;font-size:20px;cursor:pointer;color:var(--gray); line-height:1;}
+  .modal-price{ font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--gray); margin-bottom:20px; }
+  .side-toggle{ display:flex; border:1px solid var(--ink); border-radius:var(--radius); overflow:hidden; margin-bottom:18px; }
+  .side-toggle button{
+    flex:1; padding:10px; border:none; background:var(--paper); cursor:pointer;
+    font-weight:600; font-size:13px; font-family:'Inter',sans-serif;
+  }
+  .side-toggle button.active{ background:var(--ink); color:var(--paper); }
+  .modal-summary{
+    display:flex; justify-content:space-between; font-size:13px; padding:12px 0;
+    border-top:1px solid var(--line-soft); margin-top:16px; font-family:'IBM Plex Mono',monospace;
+  }
+  .modal-error{ color:var(--down); font-size:12.5px; margin-top:10px; min-height:14px; }
+  .modal-actions{ display:flex; gap:10px; margin-top:18px; }
+  .qty-quick{ display:flex; gap:8px; margin-top:8px; }
+  .qty-quick button{
+    flex:1; padding:6px; font-size:11.5px; border:1px solid var(--line); background:var(--card);
+    cursor:pointer; border-radius:var(--radius); font-family:'IBM Plex Mono',monospace;
+  }
+  .qty-quick button:hover{ border-color:var(--ink); }
+
+  .toast{
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+    background:var(--ink); color:var(--paper); padding:12px 20px; border-radius:var(--radius);
+    font-size:13px; z-index:100; box-shadow:0 6px 18px rgba(0,0,0,0.18);
+  }
+</style>
+</head>
+<body>
+
+<div class="ticker-wrap"><div class="ticker-track" id="tickerTrack"></div></div>
+
+<div id="app"></div>
+
+<script>
+/* ================= CONFIG ================= */
+const SUPABASE_URL = "https://frkpwcpgaashwpzcujtm.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZya3B3Y3BnYWFzaHdwemN1anRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQzNjA0OTIsImV4cCI6MjA5OTkzNjQ5Mn0.6pN5PreIhmk-6Ecb4R4Iiw0MVK0G5IsxoFn2dbXgUe4";
+const STARTING_BALANCE = 200;
+
+const MAIN_ASSETS = [
+  { symbol:"AAPL.US",  display:"AAPL",  name:"Apple" },
+  { symbol:"MSFT.US",  display:"MSFT",  name:"Microsoft" },
+  { symbol:"AMZN.US",  display:"AMZN",  name:"Amazon" },
+  { symbol:"GOOGL.US", display:"GOOGL", name:"Alphabet" },
+  { symbol:"META.US",  display:"META",  name:"Meta" },
+  { symbol:"NVDA.US",  display:"NVDA",  name:"Nvidia" },
+  { symbol:"TSLA.US",  display:"TSLA",  name:"Tesla" },
+  { symbol:"VUAA.UK",  display:"VUAA",  name:"Vanguard S&P 500 UCITS ETF" },
+];
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ================= STATE ================= */
+let state = {
+  user: null,          // { id, username, balance }
+  holdings: [],        // [{symbol, name, quantity, avg_cost}]
+  transactions: [],
+  prices: {},          // symbol -> { price, open, changePct }
+  watchlist: [],        // extra symbols beyond MAIN_ASSETS, from holdings
+  modal: null,          // { symbol, name, price }
+  authMode: "login",
+  authError: "",
+  busy: false,
+};
+
+const LS_KEY = "ledger_session_v1";
+
+/* ================= UTIL ================= */
+const $ = (sel, el=document) => el.querySelector(sel);
+const fmt = (n, d=2) => Number(n).toLocaleString("en-US", {minimumFractionDigits:d, maximumFractionDigits:d});
+const fmtUsd = (n) => "$" + fmt(n);
+const nowIso = () => new Date().toISOString();
+
+async function sha256(text){
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+function toast(msg){
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(()=>el.remove(), 2600);
+}
+
+function saveSession(){
+  if(state.user) localStorage.setItem(LS_KEY, JSON.stringify({id:state.user.id, username:state.user.username}));
+  else localStorage.removeItem(LS_KEY);
+}
+
+/* ================= PRICE FETCHING (Stooq, no key, via CORS proxies) ================= */
+const priceCache = {}; // symbol -> {data, ts}
+// corsproxy.io's free tier now only works from localhost, so it's not usable
+// once this is deployed anywhere else. These two stay key-free for any domain.
+const PROXIES = [
+  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+  (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+];
+
+async function fetchStooq(symbol){
+  const cached = priceCache[symbol];
+  if(cached && Date.now() - cached.ts < 45000) return cached.data;
+
+  const stooqUrl = `https://stooq.com/q/l/?s=${encodeURIComponent(symbol.toLowerCase())}&f=sd2t2ohlc&h&e=csv`;
+  let lastErr = null;
+
+  for(const wrap of PROXIES){
+    try{
+      const res = await fetch(wrap(stooqUrl));
+      if(!res.ok) throw new Error("bad status " + res.status);
+      const text = await res.text();
+      const lines = text.trim().split("\n");
+      if(lines.length < 2) throw new Error("no data row");
+      const cols = lines[1].split(",");
+      // Symbol,Date,Time,Open,High,Low,Close
+      const open = parseFloat(cols[3]);
+      const close = parseFloat(cols[6]);
+      if(!isFinite(close) || close <= 0) throw new Error("no price");
+      const changePct = isFinite(open) && open > 0 ? ((close-open)/open)*100 : 0;
+      const data = { price: close, open, changePct };
+      priceCache[symbol] = { data, ts: Date.now() };
+      return data;
+    }catch(e){
+      lastErr = e;
+      continue;
+    }
+  }
+  throw lastErr || new Error("all proxies failed");
+}
+
+async function refreshPrices(symbols){
+  const unique = [...new Set(symbols)];
+  await Promise.all(unique.map(async (sym) => {
+    try{
+      state.prices[sym] = await fetchStooq(sym);
+    }catch(e){
+      if(!state.prices[sym]) state.prices[sym] = null;
+    }
+  }));
+}
+
+/* ================= AUTH ================= */
+async function register(username, password){
+  username = username.trim().toLowerCase();
+  if(username.length < 3) throw new Error("Username needs at least 3 characters.");
+  if(password.length < 4) throw new Error("Password needs at least 4 characters.");
+
+  const { data: existing } = await sb.from("app_users").select("id").eq("username", username).maybeSingle();
+  if(existing) throw new Error("That username is taken.");
+
+  const hash = await sha256(password);
+  const { data, error } = await sb.from("app_users")
+    .insert({ username, password_hash: hash, balance: STARTING_BALANCE })
+    .select().single();
+  if(error) throw error;
+  return data;
+}
+
+async function login(username, password){
+  username = username.trim().toLowerCase();
+  const hash = await sha256(password);
+  const { data, error } = await sb.from("app_users")
+    .select("*").eq("username", username).eq("password_hash", hash).maybeSingle();
+  if(error) throw error;
+  if(!data) throw new Error("Incorrect username or password.");
+  return data;
+}
+
+async function loadUserData(userId){
+  const [{data:holdings}, {data:txns}] = await Promise.all([
+    sb.from("holdings").select("*").eq("user_id", userId).gt("quantity", 0),
+    sb.from("transactions").select("*").eq("user_id", userId).order("created_at", {ascending:false}).limit(50),
+  ]);
+  state.holdings = holdings || [];
+  state.transactions = txns || [];
+}
+
+/* ================= TRADING ================= */
+async function executeTrade(symbol, name, side, quantity, price){
+  quantity = Number(quantity);
+  const total = quantity * price;
+  const existing = state.holdings.find(h => h.symbol === symbol);
+
+  if(side === "buy"){
+    if(total > state.user.balance + 1e-9) throw new Error("Not enough balance for that.");
+    const newQty = (existing?.quantity || 0) + quantity;
+    const newAvg = existing
+      ? ((existing.quantity * existing.avg_cost) + total) / newQty
+      : price;
+
+    if(existing){
+      await sb.from("holdings").update({ quantity:newQty, avg_cost:newAvg }).eq("id", existing.id);
+    } else {
+      await sb.from("holdings").insert({ user_id:state.user.id, symbol, name, quantity:newQty, avg_cost:newAvg });
+    }
+    state.user.balance -= total;
+  } else {
+    if(!existing || existing.quantity < quantity - 1e-9) throw new Error("You don't own that much.");
+    const newQty = existing.quantity - quantity;
+    if(newQty <= 1e-9){
+      await sb.from("holdings").delete().eq("id", existing.id);
+    } else {
+      await sb.from("holdings").update({ quantity:newQty }).eq("id", existing.id);
+    }
+    state.user.balance += total;
+  }
+
+  await sb.from("app_users").update({ balance: state.user.balance }).eq("id", state.user.id);
+  await sb.from("transactions").insert({
+    user_id:state.user.id, symbol, name, side, quantity, price, total
+  });
+
+  await loadUserData(state.user.id);
+}
+
+/* ================= RENDER ================= */
+function allTrackedSymbols(){
+  const mainSyms = MAIN_ASSETS.map(a=>a.symbol);
+  const heldSyms = state.holdings.map(h=>h.symbol);
+  return [...new Set([...mainSyms, ...heldSyms])];
+}
+
+function portfolioTotals(){
+  let holdingsValue = 0, costBasis = 0;
+  for(const h of state.holdings){
+    const p = state.prices[h.symbol];
+    const live = p ? p.price : h.avg_cost;
+    holdingsValue += live * h.quantity;
+    costBasis += h.avg_cost * h.quantity;
+  }
+  const balance = state.user ? state.user.balance : 0;
+  const netWorth = balance + holdingsValue;
+  const pl = holdingsValue - costBasis;
+  const plPct = costBasis > 0 ? (pl / costBasis) * 100 : 0;
+  return { balance, holdingsValue, netWorth, pl, plPct };
+}
+
+function renderTicker(){
+  const track = $("#tickerTrack");
+  const items = MAIN_ASSETS.map(a => {
+    const p = state.prices[a.symbol];
+    if(!p) return `<span class="ticker-item"><span class="sym">${a.display}</span><span class="mono">···</span></span>`;
+    const dir = p.changePct >= 0 ? "up" : "down";
+    const arrow = p.changePct >= 0 ? "▲" : "▼";
+    return `<span class="ticker-item"><span class="sym">${a.display}</span><span>${fmtUsd(p.price)}</span><span class="chg ${dir}">${arrow} ${fmt(Math.abs(p.changePct),2)}%</span></span>`;
+  }).join("");
+  track.innerHTML = items + items; // duplicated for seamless loop
+}
+
+function renderAuth(){
+  const isLogin = state.authMode === "login";
+  return `
+    <div class="shell">
+      <div class="auth-screen">
+        <div class="auth-card">
+          <div class="auth-eyebrow">Portfolio Simulator</div>
+          <h1 class="serif">${isLogin ? "Welcome back." : "Open an account."}</h1>
+          <p class="sub">${isLogin ? "Sign in to your simulated portfolio." : `Start with $${fmt(STARTING_BALANCE,0)} in simulated cash.`}</p>
+          <form id="authForm">
+            <div class="field">
+              <label>Username</label>
+              <input type="text" id="authUser" autocomplete="username" required />
+            </div>
+            <div class="field">
+              <label>Password</label>
+              <input type="password" id="authPass" autocomplete="${isLogin?'current-password':'new-password'}" required />
+            </div>
+            <button type="submit" class="btn block" id="authSubmit">${isLogin ? "Sign in" : "Create account"}</button>
+            <div class="auth-error">${state.authError || ""}</div>
+          </form>
+          <div class="auth-toggle">
+            ${isLogin ? "New here?" : "Already have an account?"}
+            <button class="btn-link" id="authSwitch">${isLogin ? "Create an account" : "Sign in"}</button>
+          </div>
+          <div class="auth-note">Simulated trading only — no real money, brokerage, or market orders involved. Prices are delayed quotes from a free public data source.</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function assetCardHtml(symbol, display, name){
+  const p = state.prices[symbol];
+  const held = state.holdings.find(h=>h.symbol===symbol);
+  let priceHtml = `<div class="asset-loading">fetching…</div>`;
+  if(p){
+    const dir = p.changePct >= 0 ? "up" : "down";
+    const arrow = p.changePct >= 0 ? "▲" : "▼";
+    priceHtml = `<div class="p">${fmtUsd(p.price)}</div><div class="c ${dir}">${arrow} ${fmt(Math.abs(p.changePct),2)}%</div>`;
+  } else if(state.prices[symbol] === null){
+    priceHtml = `<div class="asset-loading">unavailable</div>`;
+  }
+  return `
+    <div class="asset-card" data-symbol="${symbol}" data-name="${name}">
+      <div class="asset-top">
+        <div>
+          <div class="asset-sym">${display}</div>
+          <div class="asset-name">${name}</div>
+        </div>
+        <div class="asset-price">${priceHtml}</div>
+      </div>
+      ${held ? `<div class="asset-held">Holding <b>${fmt(held.quantity,4)}</b> · avg ${fmtUsd(held.avg_cost)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderDashboard(){
+  const totals = portfolioTotals();
+  const plDir = totals.pl >= 0 ? "up" : "down";
+  const plSign = totals.pl >= 0 ? "+" : "";
+
+  const extraHoldings = state.holdings.filter(h => !MAIN_ASSETS.some(a=>a.symbol===h.symbol));
+
+  const holdingsRows = state.holdings.length ? state.holdings.map(h=>{
+    const p = state.prices[h.symbol];
+    const live = p ? p.price : h.avg_cost;
+    const value = live * h.quantity;
+    const pl = (live - h.avg_cost) * h.quantity;
+    const plPct = h.avg_cost > 0 ? ((live-h.avg_cost)/h.avg_cost)*100 : 0;
+    const dir = pl >= 0 ? "up" : "down";
+    return `<tr>
+      <td class="mono">${h.symbol.split(".")[0]}</td>
+      <td class="name">${h.name || ""}</td>
+      <td>${fmt(h.quantity,4)}</td>
+      <td>${fmtUsd(h.avg_cost)}</td>
+      <td>${fmtUsd(live)}</td>
+      <td>${fmtUsd(value)}</td>
+      <td class="${dir}">${pl>=0?"+":""}${fmtUsd(pl)} (${plPct>=0?"+":""}${fmt(plPct,1)}%)</td>
+      <td class="row-actions">
+        <button class="btn subtle openTrade" data-symbol="${h.symbol}" data-name="${h.name||''}">Trade</button>
+      </td>
+    </tr>`;
+  }).join("") : "";
+
+  const txRows = state.transactions.length ? state.transactions.slice(0,15).map(t=>{
+    const d = new Date(t.created_at);
+    return `<tr>
+      <td>${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</td>
+      <td class="mono">${t.symbol.split(".")[0]}</td>
+      <td class="${t.side==='buy'?'up':'down'}">${t.side.toUpperCase()}</td>
+      <td>${fmt(t.quantity,4)}</td>
+      <td>${fmtUsd(t.price)}</td>
+      <td>${fmtUsd(t.total)}</td>
+    </tr>`;
+  }).join("") : "";
+
+  return `
+    <div class="shell">
+      <header class="top">
+        <div class="brand">
+          <span class="mark serif">Ledger</span>
+          <span class="tag">Portfolio Simulator</span>
+        </div>
+        <div class="session">
+          <span>Signed in as <b>${state.user.username}</b></span>
+          <button class="btn-link" id="logoutBtn">Sign out</button>
+        </div>
+      </header>
+
+      <div class="summary">
+        <div class="cell">
+          <div class="label">Net worth</div>
+          <div class="value">${fmtUsd(totals.netWorth)}</div>
+        </div>
+        <div class="cell">
+          <div class="label">Cash</div>
+          <div class="value">${fmtUsd(totals.balance)}</div>
+        </div>
+        <div class="cell">
+          <div class="label">Holdings value</div>
+          <div class="value">${fmtUsd(totals.holdingsValue)}</div>
+        </div>
+        <div class="cell">
+          <div class="label">Unrealized P/L</div>
+          <div class="value ${plDir}">${plSign}${fmtUsd(totals.pl)} <span style="font-size:13px">(${plSign}${fmt(totals.plPct,1)}%)</span></div>
+        </div>
+      </div>
+
+      <div class="sec-head">
+        <h2>Markets</h2>
+        <span class="count">Delayed quotes · Stooq</span>
+      </div>
+      <div class="grid">
+        ${MAIN_ASSETS.map(a => assetCardHtml(a.symbol, a.display, a.name)).join("")}
+        ${extraHoldings.map(h => assetCardHtml(h.symbol, h.symbol.split(".")[0], h.name || h.symbol)).join("")}
+      </div>
+      <div class="add-row">
+        <input type="text" id="addSymbolInput" placeholder="Add any symbol, e.g. nflx.us, ba.us, btc.v, eurusd" />
+        <button class="btn ghost" id="addSymbolBtn">Look up</button>
+      </div>
+      <div class="add-hint">Symbols follow Stooq's format — append <span class="mono">.us</span> for US stocks, <span class="mono">.uk</span> for LSE, or use index/FX/commodity codes directly (e.g. <span class="mono">eurusd</span>, <span class="mono">xauusd</span>).</div>
+
+      <div class="sec-head">
+        <h2>Your holdings</h2>
+        <span class="count">${state.holdings.length} position${state.holdings.length===1?"":"s"}</span>
+      </div>
+      ${state.holdings.length ? `
+      <table class="tbl">
+        <thead><tr><th>Symbol</th><th>Name</th><th>Qty</th><th>Avg cost</th><th>Price</th><th>Value</th><th>P/L</th><th></th></tr></thead>
+        <tbody>${holdingsRows}</tbody>
+      </table>` : `<div class="empty-state">No positions yet. Buy something from Markets above to get started.</div>`}
+
+      <div class="sec-head">
+        <h2>Recent activity</h2>
+        <span class="count">Last ${Math.min(15,state.transactions.length)}</span>
+      </div>
+      ${state.transactions.length ? `
+      <table class="tbl">
+        <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead>
+        <tbody>${txRows}</tbody>
+      </table>` : `<div class="empty-state">No trades yet.</div>`}
+
+      <footer class="legal">Simulated portfolio for entertainment purposes only. Prices are delayed quotes sourced from a free public feed and may not reflect real market conditions. Not investment advice.</footer>
+    </div>
+    ${state.modal ? renderModal() : ""}
+  `;
+}
+
+function renderModal(){
+  const m = state.modal;
+  const p = state.prices[m.symbol];
+  const price = p ? p.price : (state.holdings.find(h=>h.symbol===m.symbol)?.avg_cost || 0);
+  const held = state.holdings.find(h=>h.symbol===m.symbol);
+  const side = m.side || "buy";
+  const qty = m.qty ?? "";
+  const total = qty && price ? Number(qty) * price : 0;
+
+  return `
+  <div class="overlay" id="overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 class="serif">${m.symbol.split(".")[0]}</h3>
+        <button class="close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-price">${m.name} · ${price ? fmtUsd(price) : "price unavailable"}</div>
+      <div class="side-toggle">
+        <button class="${side==='buy'?'active':''}" data-side="buy" id="sideBuy">Buy</button>
+        <button class="${side==='sell'?'active':''}" data-side="sell" id="sideSell" ${!held?'disabled':''}>Sell</button>
+      </div>
+      <div class="field">
+        <label>Quantity</label>
+        <input type="number" id="qtyInput" min="0" step="0.0001" value="${qty}" placeholder="0.00" />
+      </div>
+      <div class="qty-quick">
+        <button data-pct="0.25">25%</button>
+        <button data-pct="0.5">50%</button>
+        <button data-pct="1">Max</button>
+      </div>
+      <div class="modal-summary">
+        <span>${side==='buy' ? 'Cash available' : 'You hold'}</span>
+        <span>${side==='buy' ? fmtUsd(state.user.balance) : fmt(held?.quantity||0,4)}</span>
+      </div>
+      <div class="modal-summary">
+        <span>Estimated total</span>
+        <span>${fmtUsd(total)}</span>
+      </div>
+      <div class="modal-error">${m.error || ""}</div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="modalCancel" style="flex:1">Cancel</button>
+        <button class="btn ${side==='sell'?'danger':''}" id="modalConfirm" style="flex:1" ${!price?'disabled':''}>${side==='buy'?'Buy':'Sell'}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function render(){
+  const app = $("#app");
+  app.innerHTML = state.user ? renderDashboard() : renderAuth();
+  renderTicker();
+  bindEvents();
+}
+
+/* ================= EVENTS ================= */
+function bindEvents(){
+  if(!state.user){
+    $("#authForm")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const username = $("#authUser").value;
+      const password = $("#authPass").value;
+      const btn = $("#authSubmit");
+      btn.disabled = true;
+      state.authError = "";
+      try{
+        const data = state.authMode === "login" ? await login(username,password) : await register(username,password);
+        state.user = { id:data.id, username:data.username, balance:Number(data.balance) };
+        saveSession();
+        await loadUserData(state.user.id);
+        await refreshPrices(allTrackedSymbols());
+        render();
+      }catch(err){
+        state.authError = err.message || "Something went wrong.";
+        render();
+      }
+    });
+    $("#authSwitch")?.addEventListener("click", () => {
+      state.authMode = state.authMode === "login" ? "register" : "login";
+      state.authError = "";
+      render();
+    });
+    return;
+  }
+
+  $("#logoutBtn")?.addEventListener("click", () => {
+    state.user = null; state.holdings = []; state.transactions = [];
+    saveSession();
+    render();
+  });
+
+  document.querySelectorAll(".asset-card").forEach(card => {
+    card.addEventListener("click", () => {
+      state.modal = { symbol: card.dataset.symbol, name: card.dataset.name, side:"buy", qty:"" };
+      render();
+    });
+  });
+
+  document.querySelectorAll(".openTrade").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.modal = { symbol: btn.dataset.symbol, name: btn.dataset.name, side:"sell", qty:"" };
+      render();
+    });
+  });
+
+  $("#addSymbolBtn")?.addEventListener("click", async () => {
+    const input = $("#addSymbolInput");
+    const raw = input.value.trim().toLowerCase();
+    if(!raw) return;
+    input.disabled = true;
+    try{
+      const data = await fetchStooq(raw);
+      state.prices[raw] = data;
+      state.modal = { symbol: raw, name: raw.toUpperCase(), side:"buy", qty:"" };
+      render();
+    }catch(e){
+      toast("Couldn't find that symbol on Stooq.");
+      input.disabled = false;
+    }
+  });
+  $("#addSymbolInput")?.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){ e.preventDefault(); $("#addSymbolBtn").click(); }
+  });
+
+  if(state.modal){
+    $("#modalClose")?.addEventListener("click", () => { state.modal = null; render(); });
+    $("#modalCancel")?.addEventListener("click", () => { state.modal = null; render(); });
+    $("#overlay")?.addEventListener("click", (e) => { if(e.target.id === "overlay"){ state.modal = null; render(); } });
+
+    $("#sideBuy")?.addEventListener("click", () => { state.modal.side = "buy"; state.modal.error=""; render(); });
+    $("#sideSell")?.addEventListener("click", () => { if(!$("#sideSell").disabled){ state.modal.side = "sell"; state.modal.error=""; render(); } });
+
+    $("#qtyInput")?.addEventListener("input", (e) => { state.modal.qty = e.target.value; renderModalOnly(); });
+
+    document.querySelectorAll(".qty-quick button").forEach(b => {
+      b.addEventListener("click", () => {
+        const m = state.modal;
+        const p = state.prices[m.symbol];
+        const price = p ? p.price : 0;
+        const pct = parseFloat(b.dataset.pct);
+        if(m.side === "buy" && price){
+          m.qty = ((state.user.balance * pct) / price).toFixed(6);
+        } else if(m.side === "sell"){
+          const held = state.holdings.find(h=>h.symbol===m.symbol);
+          m.qty = held ? (held.quantity * pct).toFixed(6) : "0";
+        }
+        render();
+      });
+    });
+
+    $("#modalConfirm")?.addEventListener("click", async () => {
+      const m = state.modal;
+      const p = state.prices[m.symbol];
+      const price = p ? p.price : null;
+      const qty = parseFloat(m.qty);
+      if(!price){ m.error = "Price unavailable right now."; render(); return; }
+      if(!qty || qty <= 0){ m.error = "Enter a quantity."; render(); return; }
+      $("#modalConfirm").disabled = true;
+      try{
+        await executeTrade(m.symbol, m.name, m.side, qty, price);
+        toast(`${m.side === "buy" ? "Bought" : "Sold"} ${fmt(qty,4)} ${m.symbol.split(".")[0]}`);
+        state.modal = null;
+        render();
+      }catch(err){
+        m.error = err.message;
+        render();
+      }
+    });
+  }
+}
+
+function renderModalOnly(){
+  // lightweight re-render to avoid losing input focus on every keystroke
+  const existing = $("#overlay");
+  if(!existing) return;
+  const wrapper = document.createElement("div");
+  wrapper.innerHTML = renderModal();
+  existing.replaceWith(wrapper.firstElementChild);
+  bindEvents();
+}
+
+/* ================= BOOT ================= */
+async function boot(){
+  render(); // show loading/auth immediately
+
+  const saved = localStorage.getItem(LS_KEY);
+  if(saved){
+    try{
+      const { id } = JSON.parse(saved);
+      const { data } = await sb.from("app_users").select("*").eq("id", id).maybeSingle();
+      if(data){
+        state.user = { id:data.id, username:data.username, balance:Number(data.balance) };
+        await loadUserData(state.user.id);
+      }
+    }catch(e){ /* ignore, fall back to auth screen */ }
+  }
+
+  await refreshPrices(MAIN_ASSETS.map(a=>a.symbol).concat(state.holdings.map(h=>h.symbol)));
+  render();
+
+  setInterval(async () => {
+    await refreshPrices(allTrackedSymbols());
+    render();
+  }, 30000);
+}
+
+boot();
+</script>
+</body>
+</html>
