@@ -310,14 +310,14 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const STARTING_BALANCE = 200;
 
 const MAIN_ASSETS = [
-  { symbol:"AAPL.US",  display:"AAPL",  name:"Apple" },
-  { symbol:"MSFT.US",  display:"MSFT",  name:"Microsoft" },
-  { symbol:"AMZN.US",  display:"AMZN",  name:"Amazon" },
-  { symbol:"GOOGL.US", display:"GOOGL", name:"Alphabet" },
-  { symbol:"META.US",  display:"META",  name:"Meta" },
-  { symbol:"NVDA.US",  display:"NVDA",  name:"Nvidia" },
-  { symbol:"TSLA.US",  display:"TSLA",  name:"Tesla" },
-  { symbol:"VUAA.UK",  display:"VUAA",  name:"Vanguard S&P 500 UCITS ETF" },
+  { symbol:"AAPL",   display:"AAPL",  name:"Apple" },
+  { symbol:"MSFT",   display:"MSFT",  name:"Microsoft" },
+  { symbol:"AMZN",   display:"AMZN",  name:"Amazon" },
+  { symbol:"GOOGL",  display:"GOOGL", name:"Alphabet" },
+  { symbol:"META",   display:"META",  name:"Meta" },
+  { symbol:"NVDA",   display:"NVDA",  name:"Nvidia" },
+  { symbol:"TSLA",   display:"TSLA",  name:"Tesla" },
+  { symbol:"VUAA.L", display:"VUAA",  name:"Vanguard S&P 500 UCITS ETF" },
 ];
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -361,7 +361,7 @@ function saveSession(){
   else localStorage.removeItem(LS_KEY);
 }
 
-/* ================= PRICE FETCHING (Stooq, no key, via CORS proxies) ================= */
+/* ================= PRICE FETCHING (Yahoo Finance chart API, no key, via CORS proxies) ================= */
 const priceCache = {}; // symbol -> {data, ts}
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -386,41 +386,43 @@ async function fetchWithTimeout(url, ms){
   }
 }
 
-async function fetchStooq(symbol){
+async function fetchQuote(symbol){
   const cached = priceCache[symbol];
   if(cached && Date.now() - cached.ts < 45000) return cached.data;
 
-  const stooqUrl = `https://stooq.com/q/l/?s=${encodeURIComponent(symbol.toLowerCase())}&f=sd2t2ohlc&h&e=csv`;
+  // Stooq started requiring an API key for its CSV endpoint in March 2026, so
+  // we use Yahoo Finance's chart endpoint instead — still no key needed.
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
   let lastErr = null;
 
   for(const proxy of PROXIES){
     try{
-      const res = await fetchWithTimeout(proxy.build(stooqUrl), 8000);
+      const res = await fetchWithTimeout(proxy.build(yahooUrl), 8000);
       if(!res.ok) throw new Error(`${proxy.name}: HTTP ${res.status}`);
-      const text = (await res.text()).trim();
+      const raw = (await res.text()).trim();
 
-      if(!text || /^<(!doctype|html)/i.test(text)){
-        throw new Error(`${proxy.name}: got HTML instead of CSV (proxy error page)`);
-      }
+      // jina-reader wraps JSON with "Title: ...\nURL Source: ...\n..." before the
+      // body, and some proxies pad with whitespace — pull out the JSON payload
+      // by finding the first "{" rather than assuming the response is clean.
+      const jsonStart = raw.indexOf("{");
+      if(jsonStart === -1) throw new Error(`${proxy.name}: no JSON in response: "${raw.slice(0,150)}"`);
 
-      const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-      // jina-reader wraps content with "Title: ...\nURL Source: ...\n..." before
-      // the actual body, so find the real Stooq data row rather than assuming
-      // it's the second line — it always looks like SYMBOL,YYYY-MM-DD,...
-      const dataLine = lines.find(l => /^[A-Za-z0-9._-]+,\d{4}-\d{2}-\d{2},/.test(l));
-      if(!dataLine) throw new Error(`${proxy.name}: no data row found in response: "${text.slice(0,150)}"`);
+      let parsed;
+      try{ parsed = JSON.parse(raw.slice(jsonStart)); }
+      catch(e){ throw new Error(`${proxy.name}: JSON parse failed: "${raw.slice(0,150)}"`); }
 
-      const cols = dataLine.split(",");
-      // Symbol,Date,Time,Open,High,Low,Close
-      if(cols.length < 7) throw new Error(`${proxy.name}: unexpected CSV shape: "${dataLine}"`);
+      const result = parsed?.chart?.result?.[0];
+      const err = parsed?.chart?.error;
+      if(err) throw new Error(`${proxy.name}: Yahoo error — ${err.description || err.code}`);
+      if(!result?.meta) throw new Error(`${proxy.name}: unexpected response shape`);
 
-      const open = parseFloat(cols[3]);
-      const close = parseFloat(cols[6]);
-      if(cols[6] === "N/D" || !isFinite(close) || close <= 0){
-        throw new Error(`${proxy.name}: symbol not found on Stooq ("${symbol}")`);
-      }
-      const changePct = isFinite(open) && open > 0 ? ((close-open)/open)*100 : 0;
-      const data = { price: close, open, changePct };
+      const meta = result.meta;
+      const close = meta.regularMarketPrice;
+      const prevClose = meta.previousClose ?? meta.chartPreviousClose;
+      if(!isFinite(close) || close <= 0) throw new Error(`${proxy.name}: no price for "${symbol}"`);
+
+      const changePct = isFinite(prevClose) && prevClose > 0 ? ((close-prevClose)/prevClose)*100 : 0;
+      const data = { price: close, open: prevClose, changePct };
       priceCache[symbol] = { data, ts: Date.now() };
       return data;
     }catch(e){
@@ -438,7 +440,7 @@ async function refreshPrices(symbols, onEach){
   // and firing 8+ requests at once was tripping that and failing everything.
   for(const sym of unique){
     try{
-      state.prices[sym] = await fetchStooq(sym);
+      state.prices[sym] = await fetchQuote(sym);
     }catch(e){
       console.error(`[price] ${sym} unavailable:`, e.message);
       if(!state.prices[sym]) state.prices[sym] = null;
@@ -687,17 +689,17 @@ function renderDashboard(){
 
       <div class="sec-head">
         <h2>Markets</h2>
-        <span class="count">Delayed quotes · Stooq</span>
+        <span class="count">Delayed quotes · Yahoo Finance</span>
       </div>
       <div class="grid">
         ${MAIN_ASSETS.map(a => assetCardHtml(a.symbol, a.display, a.name)).join("")}
         ${extraHoldings.map(h => assetCardHtml(h.symbol, h.symbol.split(".")[0], h.name || h.symbol)).join("")}
       </div>
       <div class="add-row">
-        <input type="text" id="addSymbolInput" placeholder="Add any symbol, e.g. nflx.us, ba.us, btc.v, eurusd" />
+        <input type="text" id="addSymbolInput" placeholder="Add any symbol, e.g. NFLX, BA, BTC-USD, EURUSD=X" />
         <button class="btn ghost" id="addSymbolBtn">Look up</button>
       </div>
-      <div class="add-hint">Symbols follow Stooq's format — append <span class="mono">.us</span> for US stocks, <span class="mono">.uk</span> for LSE, or use index/FX/commodity codes directly (e.g. <span class="mono">eurusd</span>, <span class="mono">xauusd</span>).</div>
+      <div class="add-hint">Use Yahoo Finance-style tickers — plain for US stocks (<span class="mono">NVDA</span>), <span class="mono">.L</span> for LSE, or codes like <span class="mono">BTC-USD</span>, <span class="mono">EURUSD=X</span>, <span class="mono">GC=F</span> for crypto, FX, and commodities.</div>
 
       <div class="sec-head">
         <h2>Your holdings</h2>
@@ -835,12 +837,12 @@ function bindEvents(){
     if(!raw) return;
     input.disabled = true;
     try{
-      const data = await fetchStooq(raw);
+      const data = await fetchQuote(raw);
       state.prices[raw] = data;
       state.modal = { symbol: raw, name: raw.toUpperCase(), side:"buy", qty:"" };
       render();
     }catch(e){
-      toast("Couldn't find that symbol on Stooq.");
+      toast("Couldn't find that symbol on Yahoo Finance.");
       input.disabled = false;
     }
   });
