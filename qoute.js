@@ -3,12 +3,10 @@
 // needs to sit at functions/api/quote.js in the repo — Pages auto-detects it
 // and serves it at /api/quote, no config, no signup, no key.
 //
-// Why this exists: fetching Yahoo/Stooq directly from the browser needs a
-// third-party CORS proxy (allorigins, codetabs, jina-reader, corsproxy.io),
-// and all of those are unreliable — rate-limited, sometimes down, sometimes
-// blocked by the target site. A server-to-server fetch from Cloudflare's edge
-// has no CORS restriction at all (that's a browser-only concept) and can send
-// real headers, so it's far more likely to actually get data back.
+// Data source: stockanalysis.com's own internal quotes API (the same one
+// their site's price widgets poll). It's undocumented but public and doesn't
+// require a key. Fetched server-to-server here, so there's no browser CORS
+// restriction and no dependency on flaky third-party CORS-proxy services.
 
 export async function onRequestGet(context) {
   const { request } = context;
@@ -20,45 +18,51 @@ export async function onRequestGet(context) {
   }
 
   try {
-    const data = await fetchYahoo(symbol);
+    const data = await fetchStockAnalysis(symbol);
     return json(data, 200, { "Cache-Control": "public, max-age=20" });
   } catch (e) {
     return json({ error: e.message }, 502);
   }
 }
 
-async function fetchYahoo(symbol) {
-  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
-  const res = await fetch(yahooUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept": "application/json,text/plain,*/*",
-    },
-  });
-
-  if (!res.ok) throw new Error(`Yahoo HTTP ${res.status}`);
-  const data = await res.json();
-
-  const err = data?.chart?.error;
-  if (err) throw new Error(err.description || err.code || "Yahoo returned an error");
-
-  const result = data?.chart?.result?.[0];
-  const meta = result?.meta;
-  if (!meta) throw new Error("unexpected response shape from Yahoo");
-
-  const price = meta.regularMarketPrice;
-  const prevClose = meta.previousClose ?? meta.chartPreviousClose;
-  if (!isFinite(price) || price <= 0) throw new Error(`no price for "${symbol}"`);
-
-  const changePct = isFinite(prevClose) && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
-
-  return {
-    symbol,
-    price,
-    prevClose: prevClose ?? null,
-    changePct,
-    currency: meta.currency || null,
+async function fetchStockAnalysis(symbol) {
+  const lower = symbol.toLowerCase();
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
   };
+
+  // Stocks use the /s/ prefix, ETFs use /e/ — try both since we don't know
+  // which one a given ticker is (VUAA is an ETF, AAPL is a stock, etc).
+  const attempts = [];
+  for (const kind of ["s", "e"]) {
+    const apiUrl = `https://stockanalysis.com/api/quotes/${kind}/${encodeURIComponent(lower)}`;
+    try {
+      const res = await fetch(apiUrl, { headers });
+      if (!res.ok) { attempts.push(`${kind}: HTTP ${res.status}`); continue; }
+      const body = await res.json();
+      if (body?.status !== 200 || !body?.data) { attempts.push(`${kind}: no data in response`); continue; }
+
+      const d = body.data;
+      const price = d.p;
+      const prevClose = isFinite(d.cl) ? d.cl : (isFinite(d.p) && isFinite(d.c) ? d.p - d.c : null);
+      if (!isFinite(price) || price <= 0) { attempts.push(`${kind}: invalid price`); continue; }
+
+      const changePct = isFinite(d.cp) ? d.cp
+        : (prevClose && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0);
+
+      return {
+        symbol: d.symbol || symbol.toUpperCase(),
+        price,
+        prevClose,
+        changePct,
+      };
+    } catch (e) {
+      attempts.push(`${kind}: ${e.message}`);
+    }
+  }
+
+  throw new Error(`symbol not found on stockanalysis.com ("${symbol}") — ${attempts.join("; ")}`);
 }
 
 function json(body, status = 200, extraHeaders = {}) {
