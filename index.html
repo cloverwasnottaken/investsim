@@ -277,14 +277,6 @@
     font-weight:600; font-size:13px; font-family:'Inter',sans-serif;
   }
   .side-toggle button.active{ background:var(--ink); color:var(--paper); }
-  .unit-toggle{ display:flex; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; margin-bottom:14px; width:fit-content; }
-  .unit-toggle button{
-    padding:6px 14px; border:none; background:var(--paper); cursor:pointer;
-    font-weight:500; font-size:12px; font-family:'IBM Plex Mono',monospace; color:var(--gray);
-    border-right:1px solid var(--line);
-  }
-  .unit-toggle button:last-child{ border-right:none; }
-  .unit-toggle button.active{ background:var(--ink); color:var(--paper); }
   .modal-summary{
     display:flex; justify-content:space-between; font-size:13px; padding:12px 0;
     border-top:1px solid var(--line-soft); margin-top:16px; font-family:'IBM Plex Mono',monospace;
@@ -325,7 +317,7 @@ const MAIN_ASSETS = [
   { symbol:"META",   display:"META",  name:"Meta" },
   { symbol:"NVDA",   display:"NVDA",  name:"Nvidia" },
   { symbol:"TSLA",   display:"TSLA",  name:"Tesla" },
-  { symbol:"VUAA.L", display:"VUAA",  name:"Vanguard S&P 500 UCITS ETF" },
+  { symbol:"VUAA",   display:"VUAA",  name:"Vanguard S&P 500 UCITS ETF" },
 ];
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -369,26 +361,15 @@ function saveSession(){
   else localStorage.removeItem(LS_KEY);
 }
 
-/* ================= PRICE FETCHING (Yahoo Finance chart API, no key, via CORS proxies) ================= */
+/* ================= PRICE FETCHING (via our own /api/quote Pages Function) ================= */
 const priceCache = {}; // symbol -> {data, ts}
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Free CORS proxies are all rate-limited / occasionally down (no SLA on any of
-// them). We try several, in order, and log the real reason to the console
-// instead of silently marking things "unavailable" so this is debuggable.
-// corsproxy.io is deliberately excluded: as of 2026 its free tier only works
-// from localhost, so it 403s on any deployed domain.
-const PROXIES = [
-  { name:"codetabs",   build:(u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}` },
-  { name:"jina-reader",build:(u) => `https://r.jina.ai/${u}` },
-  { name:"allorigins", build:(u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
-];
-
-async function fetchWithTimeout(url, ms){
+async function fetchWithTimeout(url, ms, opts={}){
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try{
-    return await fetch(url, { signal: ctrl.signal });
+    return await fetch(url, { ...opts, signal: ctrl.signal });
   } finally {
     clearTimeout(t);
   }
@@ -396,56 +377,26 @@ async function fetchWithTimeout(url, ms){
 
 async function fetchQuote(symbol){
   const cached = priceCache[symbol];
-  if(cached && Date.now() - cached.ts < 45000) return cached.data;
+  if(cached && Date.now() - cached.ts < 20000) return cached.data;
 
-  // Stooq started requiring an API key for its CSV endpoint in March 2026, so
-  // we use Yahoo Finance's chart endpoint instead — still no key needed.
-  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
-  let lastErr = null;
-
-  for(const proxy of PROXIES){
-    try{
-      const res = await fetchWithTimeout(proxy.build(yahooUrl), 8000);
-      if(!res.ok) throw new Error(`${proxy.name}: HTTP ${res.status}`);
-      const raw = (await res.text()).trim();
-
-      // jina-reader wraps JSON with "Title: ...\nURL Source: ...\n..." before the
-      // body, and some proxies pad with whitespace — pull out the JSON payload
-      // by finding the first "{" rather than assuming the response is clean.
-      const jsonStart = raw.indexOf("{");
-      if(jsonStart === -1) throw new Error(`${proxy.name}: no JSON in response: "${raw.slice(0,150)}"`);
-
-      let parsed;
-      try{ parsed = JSON.parse(raw.slice(jsonStart)); }
-      catch(e){ throw new Error(`${proxy.name}: JSON parse failed: "${raw.slice(0,150)}"`); }
-
-      const result = parsed?.chart?.result?.[0];
-      const err = parsed?.chart?.error;
-      if(err) throw new Error(`${proxy.name}: Yahoo error — ${err.description || err.code}`);
-      if(!result?.meta) throw new Error(`${proxy.name}: unexpected response shape`);
-
-      const meta = result.meta;
-      const close = meta.regularMarketPrice;
-      const prevClose = meta.previousClose ?? meta.chartPreviousClose;
-      if(!isFinite(close) || close <= 0) throw new Error(`${proxy.name}: no price for "${symbol}"`);
-
-      const changePct = isFinite(prevClose) && prevClose > 0 ? ((close-prevClose)/prevClose)*100 : 0;
-      const data = { price: close, open: prevClose, changePct };
-      priceCache[symbol] = { data, ts: Date.now() };
-      return data;
-    }catch(e){
-      lastErr = e;
-      console.warn(`[price] ${symbol} via ${proxy.name} failed:`, e.message);
-      continue;
-    }
+  // This calls our own same-origin /api/quote (a Cloudflare Pages Function —
+  // see functions/api/quote.js). It fetches stockanalysis.com server-to-server,
+  // which isn't subject to browser CORS and doesn't depend on flaky third-party
+  // proxy services (allorigins/codetabs/jina-reader were all unreliable).
+  const res = await fetchWithTimeout(`/api/quote?symbol=${encodeURIComponent(symbol)}`, 8000);
+  const body = await res.json().catch(() => null);
+  if(!res.ok || !body || body.error){
+    throw new Error(body?.error || `HTTP ${res.status}`);
   }
-  throw lastErr || new Error("all proxies failed");
+
+  const data = { price: body.price, open: body.prevClose, changePct: body.changePct };
+  priceCache[symbol] = { data, ts: Date.now() };
+  return data;
 }
 
 async function refreshPrices(symbols, onEach){
   const unique = [...new Set(symbols)];
-  // Sequential with a small stagger — free proxies rate-limit hard on bursts,
-  // and firing 8+ requests at once was tripping that and failing everything.
+  // Sequential with a small stagger, just to be gentle on the function/data source.
   for(const sym of unique){
     try{
       state.prices[sym] = await fetchQuote(sym);
@@ -454,7 +405,7 @@ async function refreshPrices(symbols, onEach){
       if(!state.prices[sym]) state.prices[sym] = null;
     }
     if(onEach) onEach(sym);
-    await sleep(120);
+    await sleep(80);
   }
 }
 
@@ -697,17 +648,17 @@ function renderDashboard(){
 
       <div class="sec-head">
         <h2>Markets</h2>
-        <span class="count">Delayed quotes · Yahoo Finance</span>
+        <span class="count">Delayed quotes · stockanalysis.com</span>
       </div>
       <div class="grid">
         ${MAIN_ASSETS.map(a => assetCardHtml(a.symbol, a.display, a.name)).join("")}
         ${extraHoldings.map(h => assetCardHtml(h.symbol, h.symbol.split(".")[0], h.name || h.symbol)).join("")}
       </div>
       <div class="add-row">
-        <input type="text" id="addSymbolInput" placeholder="Add any symbol, e.g. NFLX, BA, BTC-USD, EURUSD=X" />
+        <input type="text" id="addSymbolInput" placeholder="Add any symbol, e.g. NFLX, BA, SPY, QQQ" />
         <button class="btn ghost" id="addSymbolBtn">Look up</button>
       </div>
-      <div class="add-hint">Use Yahoo Finance-style tickers — plain for US stocks (<span class="mono">NVDA</span>), <span class="mono">.L</span> for LSE, or codes like <span class="mono">BTC-USD</span>, <span class="mono">EURUSD=X</span>, <span class="mono">GC=F</span> for crypto, FX, and commodities.</div>
+      <div class="add-hint">Type any US-listed stock or ETF ticker (e.g. <span class="mono">NFLX</span>, <span class="mono">SPY</span>, <span class="mono">QQQ</span>) — plain symbol, no suffix needed.</div>
 
       <div class="sec-head">
         <h2>Your holdings</h2>
@@ -741,14 +692,12 @@ function renderModal(){
   const price = p ? p.price : (state.holdings.find(h=>h.symbol===m.symbol)?.avg_cost || 0);
   const held = state.holdings.find(h=>h.symbol===m.symbol);
   const side = m.side || "buy";
-  const unit = m.unit || "usd";
-  const raw = Number(m.qty) || 0;
+  const mode = m.mode || "usd"; // "usd" = type a dollar amount, "qty" = type a share count
+  const raw = m.raw ?? "";
 
-  // Interpret the raw input differently depending on unit: in "usd" mode the
-  // input IS the dollar amount; in "qty" mode the input IS the share count.
-  const amountUsd = unit === "usd" ? raw : raw * price;
-  const shareQty = unit === "usd" ? (price ? raw / price : 0) : raw;
-  const total = amountUsd;
+  const amount = mode === "usd" ? (parseFloat(raw) || 0) : (parseFloat(raw) || 0) * price;
+  const qty = mode === "usd" ? (price ? (parseFloat(raw) || 0) / price : 0) : (parseFloat(raw) || 0);
+  const total = mode === "usd" ? amount : qty * price;
 
   return `
   <div class="overlay" id="overlay">
@@ -762,16 +711,14 @@ function renderModal(){
         <button class="${side==='buy'?'active':''}" data-side="buy" id="sideBuy">Buy</button>
         <button class="${side==='sell'?'active':''}" data-side="sell" id="sideSell" ${!held?'disabled':''}>Sell</button>
       </div>
-      <div class="unit-toggle">
-        <button class="${unit==='usd'?'active':''}" data-unit="usd" id="unitUsd">$ Amount</button>
-        <button class="${unit==='qty'?'active':''}" data-unit="qty" id="unitQty">Shares</button>
+      <div class="side-toggle" style="margin-bottom:4px">
+        <button class="${mode==='usd'?'active':''}" data-mode="usd" id="modeUsd">$ Amount</button>
+        <button class="${mode==='qty'?'active':''}" data-mode="qty" id="modeQty">Shares</button>
       </div>
-      <div class="field">
-        <label>${unit==='usd' ? 'Amount (USD)' : 'Quantity'}</label>
-        <input type="number" id="qtyInput" min="0" step="${unit==='usd'?'0.01':'0.0001'}" value="${m.qty ?? ''}" placeholder="${unit==='usd'?'0.00':'0.0000'}" />
+      <div class="field" style="margin-top:14px">
+        <label>${mode === "usd" ? "Amount (USD)" : "Quantity"}</label>
+        <input type="number" id="valueInput" min="0" step="${mode === 'usd' ? '0.01' : '0.000001'}" value="${raw}" placeholder="${mode === 'usd' ? '0.00' : '0.000000'}" />
       </div>
-      ${unit==='usd' && raw>0 ? `<div class="add-hint">≈ ${fmt(shareQty,6)} shares</div>` : ''}
-      ${unit==='qty' && raw>0 ? `<div class="add-hint">≈ ${fmtUsd(amountUsd)}</div>` : ''}
       <div class="qty-quick">
         <button data-pct="0.25">25%</button>
         <button data-pct="0.5">50%</button>
@@ -779,11 +726,11 @@ function renderModal(){
       </div>
       <div class="modal-summary">
         <span>${side==='buy' ? 'Cash available' : 'You hold'}</span>
-        <span>${side==='buy' ? fmtUsd(state.user.balance) : fmt(held?.quantity||0,4)}</span>
+        <span>${side==='buy' ? fmtUsd(state.user.balance) : fmt(held?.quantity||0,4) + " sh"}</span>
       </div>
       <div class="modal-summary">
-        <span>Estimated total</span>
-        <span>${fmtUsd(total)}</span>
+        <span>${mode === "usd" ? "≈ Shares" : "Estimated total"}</span>
+        <span>${mode === "usd" ? fmt(qty,6) : fmtUsd(total)}</span>
       </div>
       <div class="modal-error">${m.error || ""}</div>
       <div class="modal-actions">
@@ -839,14 +786,14 @@ function bindEvents(){
 
   document.querySelectorAll(".asset-card").forEach(card => {
     card.addEventListener("click", () => {
-      state.modal = { symbol: card.dataset.symbol, name: card.dataset.name, side:"buy", unit:"usd", qty:"" };
+      state.modal = { symbol: card.dataset.symbol, name: card.dataset.name, side:"buy", mode:"usd", raw:"" };
       render();
     });
   });
 
   document.querySelectorAll(".openTrade").forEach(btn => {
     btn.addEventListener("click", () => {
-      state.modal = { symbol: btn.dataset.symbol, name: btn.dataset.name, side:"sell", unit:"qty", qty:"" };
+      state.modal = { symbol: btn.dataset.symbol, name: btn.dataset.name, side:"sell", mode:"qty", raw:"" };
       render();
     });
   });
@@ -859,10 +806,10 @@ function bindEvents(){
     try{
       const data = await fetchQuote(raw);
       state.prices[raw] = data;
-      state.modal = { symbol: raw, name: raw.toUpperCase(), side:"buy", unit:"usd", qty:"" };
+      state.modal = { symbol: sym, name: sym.toUpperCase(), side:"buy", mode:"usd", raw:"" };
       render();
     }catch(e){
-      toast("Couldn't find that symbol on Yahoo Finance.");
+      toast("Couldn't find that symbol.");
       input.disabled = false;
     }
   });
@@ -875,33 +822,31 @@ function bindEvents(){
     $("#modalCancel")?.addEventListener("click", () => { state.modal = null; render(); });
     $("#overlay")?.addEventListener("click", (e) => { if(e.target.id === "overlay"){ state.modal = null; render(); } });
 
-    $("#sideBuy")?.addEventListener("click", () => { state.modal.side = "buy"; state.modal.unit = "usd"; state.modal.qty = ""; state.modal.error=""; render(); });
-    $("#sideSell")?.addEventListener("click", () => { if(!$("#sideSell").disabled){ state.modal.side = "sell"; state.modal.unit = "qty"; state.modal.qty = ""; state.modal.error=""; render(); } });
+    $("#sideBuy")?.addEventListener("click", () => { state.modal.side = "buy"; state.modal.error=""; render(); });
+    $("#sideSell")?.addEventListener("click", () => { if(!$("#sideSell").disabled){ state.modal.side = "sell"; state.modal.error=""; render(); } });
 
-    $("#unitUsd")?.addEventListener("click", () => {
+    $("#modeUsd")?.addEventListener("click", () => {
       const m = state.modal;
-      if(m.unit !== "usd"){
-        const p = state.prices[m.symbol];
-        const price = p ? p.price : 0;
-        const shareQty = Number(m.qty) || 0;
-        m.qty = price ? (shareQty * price).toFixed(2) : "";
-        m.unit = "usd";
-        render();
-      }
+      if(m.mode === "usd") return;
+      const p = state.prices[m.symbol];
+      const price = p ? p.price : 0;
+      const curQty = parseFloat(m.raw) || 0;
+      m.mode = "usd";
+      m.raw = price ? (curQty * price).toFixed(2) : "";
+      render();
     });
-    $("#unitQty")?.addEventListener("click", () => {
+    $("#modeQty")?.addEventListener("click", () => {
       const m = state.modal;
-      if(m.unit !== "qty"){
-        const p = state.prices[m.symbol];
-        const price = p ? p.price : 0;
-        const amountUsd = Number(m.qty) || 0;
-        m.qty = price ? (amountUsd / price).toFixed(6) : "";
-        m.unit = "qty";
-        render();
-      }
+      if(m.mode === "qty") return;
+      const p = state.prices[m.symbol];
+      const price = p ? p.price : 0;
+      const curAmount = parseFloat(m.raw) || 0;
+      m.mode = "qty";
+      m.raw = price ? (curAmount / price).toFixed(6) : "";
+      render();
     });
 
-    $("#qtyInput")?.addEventListener("input", (e) => { state.modal.qty = e.target.value; renderModalOnly(); });
+    $("#valueInput")?.addEventListener("input", (e) => { state.modal.raw = e.target.value; renderModalOnly(); });
 
     document.querySelectorAll(".qty-quick button").forEach(b => {
       b.addEventListener("click", () => {
@@ -909,13 +854,13 @@ function bindEvents(){
         const p = state.prices[m.symbol];
         const price = p ? p.price : 0;
         const pct = parseFloat(b.dataset.pct);
-        if(m.side === "buy" && price){
-          const amountUsd = state.user.balance * pct;
-          m.qty = m.unit === "usd" ? amountUsd.toFixed(2) : (amountUsd / price).toFixed(6);
-        } else if(m.side === "sell"){
+        if(m.side === "buy"){
+          const dollarAmount = state.user.balance * pct;
+          m.raw = m.mode === "usd" ? dollarAmount.toFixed(2) : (price ? (dollarAmount / price).toFixed(6) : "0");
+        } else {
           const held = state.holdings.find(h=>h.symbol===m.symbol);
-          const shareQty = held ? held.quantity * pct : 0;
-          m.qty = m.unit === "usd" ? (shareQty * price).toFixed(2) : shareQty.toFixed(6);
+          const heldQty = held ? held.quantity * pct : 0;
+          m.raw = m.mode === "qty" ? heldQty.toFixed(6) : (heldQty * price).toFixed(2);
         }
         render();
       });
@@ -925,17 +870,14 @@ function bindEvents(){
       const m = state.modal;
       const p = state.prices[m.symbol];
       const price = p ? p.price : null;
-      const raw = parseFloat(m.qty);
+      const raw = parseFloat(m.raw) || 0;
+      const qty = m.mode === "usd" ? (price ? raw / price : 0) : raw;
       if(!price){ m.error = "Price unavailable right now."; render(); return; }
-      if(!raw || raw <= 0){ m.error = m.unit === "usd" ? "Enter an amount." : "Enter a quantity."; render(); return; }
-      // Convert to shares if the person typed a dollar amount. Rounded to 6
-      // decimal places, same precision the quantity input already allowed.
-      const qty = m.unit === "usd" ? Number((raw / price).toFixed(6)) : raw;
-      if(!qty || qty <= 0){ m.error = "That amount is too small to buy any shares."; render(); return; }
+      if(!qty || qty <= 0){ m.error = m.mode === "usd" ? "Enter an amount." : "Enter a quantity."; render(); return; }
       $("#modalConfirm").disabled = true;
       try{
         await executeTrade(m.symbol, m.name, m.side, qty, price);
-        toast(`${m.side === "buy" ? "Bought" : "Sold"} ${fmt(qty,4)} ${m.symbol.split(".")[0]}`);
+        toast(`${m.side === "buy" ? "Bought" : "Sold"} ${fmt(qty,6)} ${m.symbol.split(".")[0]}`);
         state.modal = null;
         render();
       }catch(err){
