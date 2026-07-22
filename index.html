@@ -317,7 +317,6 @@ const MAIN_ASSETS = [
   { symbol:"META",   display:"META",  name:"Meta" },
   { symbol:"NVDA",   display:"NVDA",  name:"Nvidia" },
   { symbol:"TSLA",   display:"TSLA",  name:"Tesla" },
-  { symbol:"VUAA",   display:"VUAA",  name:"Vanguard S&P 500 UCITS ETF" },
 ];
 
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -848,7 +847,10 @@ function bindEvents(){
       render();
     });
 
-    $("#valueInput")?.addEventListener("input", (e) => { state.modal.raw = e.target.value; renderModalOnly(); });
+    $("#valueInput")?.addEventListener("input", (e) => { 
+      state.modal.raw = e.target.value;
+      updateModalSummaryOnly();
+    });
 
     document.querySelectorAll(".qty-quick button").forEach(b => {
       b.addEventListener("click", () => {
@@ -890,14 +892,33 @@ function bindEvents(){
   }
 }
 
-function renderModalOnly(){
-  // lightweight re-render to avoid losing input focus on every keystroke
-  const existing = $("#overlay");
-  if(!existing) return;
-  const wrapper = document.createElement("div");
-  wrapper.innerHTML = renderModal();
-  existing.replaceWith(wrapper.firstElementChild);
-  bindEvents();
+function updateModalSummaryOnly(){
+  // Update ONLY the summary lines, preserve input focus
+  const m = state.modal;
+  const p = state.prices[m.symbol];
+  const price = p ? p.price : (state.holdings.find(h=>h.symbol===m.symbol)?.avg_cost || 0);
+  const held = state.holdings.find(h=>h.symbol===m.symbol);
+  const mode = m.mode || "usd";
+  const raw = m.raw ?? "";
+
+  const amount = mode === "usd" ? (parseFloat(raw) || 0) : (parseFloat(raw) || 0) * price;
+  const qty = mode === "usd" ? (price ? (parseFloat(raw) || 0) / price : 0) : (parseFloat(raw) || 0);
+  const total = mode === "usd" ? amount : qty * price;
+
+  // Update the two summary rows
+  const summaries = document.querySelectorAll(".modal-summary");
+  if(summaries[0]){
+    summaries[0].innerHTML = `
+      <span>${m.side==='buy' ? 'Cash available' : 'You hold'}</span>
+      <span>${m.side==='buy' ? fmtUsd(state.user.balance) : fmt(held?.quantity||0,4) + " sh"}</span>
+    `;
+  }
+  if(summaries[1]){
+    summaries[1].innerHTML = `
+      <span>${mode === "usd" ? "≈ Shares" : "Estimated total"}</span>
+      <span>${mode === "usd" ? fmt(qty,6) : fmtUsd(total)}</span>
+    `;
+  }
 }
 
 /* ================= BOOT ================= */
