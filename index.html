@@ -800,13 +800,15 @@ function bindEvents(){
 
   $("#addSymbolBtn")?.addEventListener("click", async () => {
     const input = $("#addSymbolInput");
-    const raw = input.value.trim().toLowerCase();
+    const raw = input.value.trim().toUpperCase();
     if(!raw) return;
     input.disabled = true;
     try{
       const data = await fetchQuote(raw);
       state.prices[raw] = data;
-      state.modal = { symbol: sym, name: sym.toUpperCase(), side:"buy", mode:"usd", raw:"" };
+      state.modal = { symbol: raw, name: raw, side:"buy", mode:"usd", raw:"" };
+      input.value = "";
+      input.disabled = false;
       render();
     }catch(e){
       toast("Couldn't find that symbol.");
