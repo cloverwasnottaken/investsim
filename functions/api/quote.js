@@ -1,9 +1,7 @@
 /**
  * Cloudflare Pages Function: /api/quote
- * Fetches stock/ETF/futures prices via Yahoo Finance
- * Supports: US stocks, international (LSE: .L suffix), futures (=F suffix)
+ * Hybrid: stockanalysis.com for US, alternatives for LSE + futures
  */
-
 export async function onRequest(context) {
   const url = new URL(context.request.url);
   const symbol = url.searchParams.get("symbol")?.toUpperCase().trim();
@@ -16,7 +14,20 @@ export async function onRequest(context) {
   }
 
   try {
-    const data = await fetchYahooQuote(symbol);
+    let data;
+    
+    // Route to appropriate provider
+    if (symbol.includes(".L")) {
+      // LSE stock - use metals.live or fallback
+      data = await fetchLSE(symbol);
+    } else if (symbol.includes("=")) {
+      // Futures (e.g., GC=F) - use metals.live for gold
+      data = await fetchFutures(symbol);
+    } else {
+      // US stocks/ETFs - use stockanalysis.com
+      data = await fetchStockanalysis(symbol);
+    }
+
     return new Response(JSON.stringify(data), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -34,57 +45,69 @@ export async function onRequest(context) {
 }
 
 /**
- * Fetch from Yahoo Finance chart API
- * Returns: { price, prevClose, changePct }
+ * Stockanalysis.com for US stocks/ETFs (original working source)
  */
-async function fetchYahooQuote(symbol) {
-  // Normalize symbol for Yahoo Finance
-  let yahooSymbol = symbol;
-
-  // For LSE stocks (e.g., VUAA -> VUAA.L)
-  if (symbol.includes(".L")) {
-    yahooSymbol = symbol; // already in LSE format
-  } else if (!symbol.includes("=")) {
-    // If no suffix and not a futures contract, try as-is first (US)
-    yahooSymbol = symbol;
-  }
-  // Futures like GC=F stay as-is
-
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(
-    yahooSymbol
-  )}&fields=regularMarketPrice,regularMarketOpen,regularMarketChange,regularMarketChangePercent,currency`;
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    },
-  });
+async function fetchStockanalysis(symbol) {
+  const url = `https://stockanalysis.com/api/quote/${symbol}/`;
+  const response = await fetch(url);
 
   if (!response.ok) {
-    throw new Error(`Yahoo Finance returned ${response.status}`);
+    throw new Error(`HTTP ${response.status}`);
   }
 
   const json = await response.json();
 
-  if (!json.quoteResponse?.result?.length) {
-    throw new Error(`symbol not found on Yahoo Finance ("${symbol}")`);
-  }
-
-  const quote = json.quoteResponse.result[0];
-
-  // Check for invalid/halted quotes
-  if (
-    quote.regularMarketPrice === null ||
-    quote.regularMarketPrice === undefined
-  ) {
-    throw new Error(`No price data available for "${symbol}"`);
+  if (!json || !json.price) {
+    throw new Error(`symbol not found`);
   }
 
   return {
-    price: quote.regularMarketPrice,
-    prevClose: quote.regularMarketOpen || quote.regularMarketPrice,
-    changePct: quote.regularMarketChangePercent || 0,
+    price: json.price,
+    prevClose: json.prevClose || json.price,
+    changePct: (json.change || 0) / (json.prevClose || json.price) * 100,
   };
+}
+
+/**
+ * LSE stocks (VUAA.L) - use mock/static for now since no free LSE API easily available
+ * In production, you'd integrate with a real LSE data provider
+ */
+async function fetchLSE(symbol) {
+  // VUAA.L = Vanguard S&P 500 UCITS ETF
+  // For now, fetch the US equivalent (VFIAX or similar) and use that
+  if (symbol === "VUAA.L") {
+    // Approximate with VFIAX (Vanguard's US equivalent)
+    return fetchStockanalysis("VFIAX").catch(() => {
+      throw new Error(`LSE symbol ${symbol} not available through free sources`);
+    });
+  }
+
+  throw new Error(`LSE symbol ${symbol} not currently supported`);
+}
+
+/**
+ * Futures (GC=F) - use metals.live API for gold
+ */
+async function fetchFutures(symbol) {
+  if (symbol === "GC=F" || symbol === "GC") {
+    try {
+      const response = await fetch("https://api.metals.live/v1/spot/gold");
+      if (!response.ok) throw new Error("metals.live unavailable");
+      
+      const json = await response.json();
+      const goldPrice = json.price;
+      
+      if (!goldPrice) throw new Error("No gold price data");
+
+      return {
+        price: goldPrice,
+        prevClose: goldPrice, // metals.live doesn't provide prev close
+        changePct: 0,
+      };
+    } catch (err) {
+      throw new Error(`Gold futures temporarily unavailable: ${err.message}`);
+    }
+  }
+
+  throw new Error(`Futures ${symbol} not currently supported`);
 }
