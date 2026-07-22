@@ -1,77 +1,90 @@
-// Cloudflare Pages Function.
-// Since this project is already deployed on Cloudflare Pages, this file just
-// needs to sit at functions/api/quote.js in the repo — Pages auto-detects it
-// and serves it at /api/quote, no config, no signup, no key.
-//
-// Data source: stockanalysis.com's own internal quotes API (the same one
-// their site's price widgets poll). It's undocumented but public and doesn't
-// require a key. Fetched server-to-server here, so there's no browser CORS
-// restriction and no dependency on flaky third-party CORS-proxy services.
+/**
+ * Cloudflare Pages Function: /api/quote
+ * Fetches stock/ETF/futures prices via Yahoo Finance
+ * Supports: US stocks, international (LSE: .L suffix), futures (=F suffix)
+ */
 
-export async function onRequestGet(context) {
-  const { request } = context;
-  const url = new URL(request.url);
-  const symbol = url.searchParams.get("symbol");
+export async function onRequest(context) {
+  const url = new URL(context.request.url);
+  const symbol = url.searchParams.get("symbol")?.toUpperCase().trim();
 
   if (!symbol) {
-    return json({ error: "missing ?symbol=" }, 400);
+    return new Response(JSON.stringify({ error: "Missing symbol parameter" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   try {
-    const data = await fetchStockAnalysis(symbol);
-    return json(data, 200, { "Cache-Control": "public, max-age=20" });
-  } catch (e) {
-    return json({ error: e.message }, 502);
+    const data = await fetchYahooQuote(symbol);
+    return new Response(JSON.stringify(data), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (err) {
+    console.error(`[quote] ${symbol} error:`, err.message);
+    return new Response(
+      JSON.stringify({ error: err.message || "Quote fetch failed" }),
+      {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
   }
 }
 
-async function fetchStockAnalysis(symbol) {
-  const lower = symbol.toLowerCase();
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json,text/plain,*/*",
-  };
+/**
+ * Fetch from Yahoo Finance chart API
+ * Returns: { price, prevClose, changePct }
+ */
+async function fetchYahooQuote(symbol) {
+  // Normalize symbol for Yahoo Finance
+  let yahooSymbol = symbol;
 
-  // Stocks use the /s/ prefix, ETFs use /e/ — try both since we don't know
-  // which one a given ticker is (VUAA is an ETF, AAPL is a stock, etc).
-  const attempts = [];
-  for (const kind of ["s", "e"]) {
-    const apiUrl = `https://stockanalysis.com/api/quotes/${kind}/${encodeURIComponent(lower)}`;
-    try {
-      const res = await fetch(apiUrl, { headers });
-      if (!res.ok) { attempts.push(`${kind}: HTTP ${res.status}`); continue; }
-      const body = await res.json();
-      if (body?.status !== 200 || !body?.data) { attempts.push(`${kind}: no data in response`); continue; }
-
-      const d = body.data;
-      const price = d.p;
-      const prevClose = isFinite(d.cl) ? d.cl : (isFinite(d.p) && isFinite(d.c) ? d.p - d.c : null);
-      if (!isFinite(price) || price <= 0) { attempts.push(`${kind}: invalid price`); continue; }
-
-      const changePct = isFinite(d.cp) ? d.cp
-        : (prevClose && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0);
-
-      return {
-        symbol: d.symbol || symbol.toUpperCase(),
-        price,
-        prevClose,
-        changePct,
-      };
-    } catch (e) {
-      attempts.push(`${kind}: ${e.message}`);
-    }
+  // For LSE stocks (e.g., VUAA -> VUAA.L)
+  if (symbol.includes(".L")) {
+    yahooSymbol = symbol; // already in LSE format
+  } else if (!symbol.includes("=")) {
+    // If no suffix and not a futures contract, try as-is first (US)
+    yahooSymbol = symbol;
   }
+  // Futures like GC=F stay as-is
 
-  throw new Error(`symbol not found on stockanalysis.com ("${symbol}") — ${attempts.join("; ")}`);
-}
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(
+    yahooSymbol
+  )}&fields=regularMarketPrice,regularMarketOpen,regularMarketChange,regularMarketChangePercent,currency`;
 
-function json(body, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(body), {
-    status,
+  const response = await fetch(url, {
+    method: "GET",
     headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      ...extraHeaders,
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     },
   });
+
+  if (!response.ok) {
+    throw new Error(`Yahoo Finance returned ${response.status}`);
+  }
+
+  const json = await response.json();
+
+  if (!json.quoteResponse?.result?.length) {
+    throw new Error(`symbol not found on Yahoo Finance ("${symbol}")`);
+  }
+
+  const quote = json.quoteResponse.result[0];
+
+  // Check for invalid/halted quotes
+  if (
+    quote.regularMarketPrice === null ||
+    quote.regularMarketPrice === undefined
+  ) {
+    throw new Error(`No price data available for "${symbol}"`);
+  }
+
+  return {
+    price: quote.regularMarketPrice,
+    prevClose: quote.regularMarketOpen || quote.regularMarketPrice,
+    changePct: quote.regularMarketChangePercent || 0,
+  };
 }
